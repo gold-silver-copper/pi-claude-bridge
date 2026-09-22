@@ -27,6 +27,7 @@ import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachm
 import { createToolServer } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
 import { nonSystemMessages, toBridgeContext } from "./transcript.js";
+import { foldSideCallPrompt, isStandaloneSideCall } from "./side-call.js";
 
 // Compat (#2): use factory if available (pi-ai ≥0.66), else fall back to constructor (gsd-pi etc.)
 const _piAi = piAi as any;
@@ -450,12 +451,21 @@ function isolatedStreamFn(model: Model<any>, context: Context, options?: SimpleS
 	return stream;
 }
 
+/** A standalone side call (see side-call.ts) on the same one-shot isolated process. */
+function sideCallStreamFn(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+	const stream = newAssistantMessageEventStream();
+	void runIsolatedSummary(model, context, options, stream, "side call");
+	return stream;
+}
+
 async function runIsolatedSummary(
 	model: Model<any>,
 	context: Context,
 	options: SimpleStreamOptions | undefined,
 	stream: AssistantMessageEventStream,
+	kind: "summary" | "side call" = "summary",
 ): Promise<void> {
+	const label = kind === "side call" ? "side call" : "compact summary";
 	// pi 0.86 delivers compaction/branch-summary requests as a transcript: the summarization
 	// prompt folded into a leading system message ahead of the lone user message (issue #106).
 	// Recover the 0.85 shape so the extraction assertion below holds and the summarization
@@ -475,16 +485,19 @@ async function runIsolatedSummary(
 		// "none". Any of them may appear in a future pi release without a bridge change,
 		// so route on the marker, not on which summarizer is calling. Non-summarizer calls
 		// must still match the [system,user] compaction shape exactly.
+		// Side calls may be multi-turn threads; fold earlier turns into the one prompt.
 		const isOneOffSummary = options?.cacheRetention === "none";
-		const promptText = isOneOffSummary
-			? extractUserPrompt(context.messages)
-			: extractIsolatedSummaryPrompt(context.messages);
-		if (!promptText) throw new Error("runIsolatedSummary: one-off summary without a user prompt (last message is not user?)");
+		const promptText = kind === "side call"
+			? foldSideCallPrompt(context.messages)
+			: isOneOffSummary
+				? extractUserPrompt(context.messages)
+				: extractIsolatedSummaryPrompt(context.messages);
+		if (!promptText) throw new Error(`runIsolatedSummary: ${kind} without a user prompt (last message is not user?)`);
 		const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
 		const compactProviderSettings = loadConfig(cwd).provider;
 		const claudeExecutable = compactProviderSettings?.pathToClaudeCodeExecutable;
 		const cliModel = claudeCodeModelId(model, longContextSettings);
-		debug(`compact summary: spawn model=${cliModel} registeredModel=${model.id} promptLen=${promptText.length}`);
+		debug(`${label}: spawn model=${cliModel} registeredModel=${model.id} promptLen=${promptText.length}`);
 
 		sdkQuery = query({
 			prompt: promptText,
@@ -501,7 +514,7 @@ async function runIsolatedSummary(
 				model: cliModel,
 				maxTurns: 1,
 				...(claudeExecutable ? { pathToClaudeCodeExecutable: claudeExecutable } : {}),
-				...makeCliDebugOptions("compact-summary"),
+				...makeCliDebugOptions(label.replace(" ", "-")),
 			},
 		});
 
@@ -517,7 +530,7 @@ async function runIsolatedSummary(
 
 		for await (const message of sdkQuery) {
 			if (!firstEventLogged) {
-				debug(`compact summary: first event type=${message.type}`);
+				debug(`${label}: first event type=${message.type}`);
 				firstEventLogged = true;
 			}
 			if (wasAborted) break;
@@ -527,7 +540,7 @@ async function runIsolatedSummary(
 					if (block.type === "text" && typeof block.text === "string") assistantText += block.text;
 				}
 			} else if (message.type === "result") {
-				logServedContextWindow("compact summary", message, model);
+				logServedContextWindow(label, message, model);
 				errorText = resultErrorText(message);
 				if (!errorText && message.subtype === "success") finalText = message.result || assistantText;
 			}
@@ -535,7 +548,7 @@ async function runIsolatedSummary(
 
 		if (wasAborted) {
 			const output = newAssistantOutput(model, "", "aborted", "Operation aborted");
-			debug("compact summary: aborted");
+			debug(`${label}: aborted`);
 			stream.push({ type: "error", reason: "aborted", error: output });
 			stream.end();
 			return;
@@ -543,14 +556,14 @@ async function runIsolatedSummary(
 
 		const text = finalText || assistantText;
 		if (errorText || !text.trim()) {
-			const msg = errorText ?? "Claude Code summary returned empty text";
-			debug(`compact summary: error ${msg}`);
+			const msg = errorText ?? `Claude Code ${kind} returned empty text`;
+			debug(`${label}: error ${msg}`);
 			stream.push({ type: "error", reason: "error", error: newAssistantOutput(model, "", "error", msg) });
 			stream.end();
 			return;
 		}
 
-		debug(`compact summary: done textLen=${text.length}`);
+		debug(`${label}: done textLen=${text.length}`);
 		stream.push({ type: "done", reason: "stop", message: newAssistantOutput(model, text, "stop") });
 		stream.end();
 	} catch (err) {
@@ -777,6 +790,7 @@ export const __test = {
 	CC_CHILD_ENV,
 	buildMcpServers,
 	branchSummaryOutcome,
+	streamClaudeAgentSdk,
 	get promptCaptures() {
 		return promptCaptures;
 	},
@@ -1505,6 +1519,14 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	if (options?.cacheRetention === "none") {
 		debug(`provider: one-off summarizer call (cacheRetention none) routed to isolated summary, msgs=${context.messages.length}`);
 		return isolatedStreamFn(model, context, options);
+	}
+
+	// A standalone side call — an extension's own prompt, no tools, never seen by the
+	// capture boundaries (pi-btw's /btw) — would otherwise throw in resolveOrDerive, or
+	// worse, be synced into the shared session. See side-call.ts.
+	if (isStandaloneSideCall(context, promptCaptures)) {
+		debug(`provider: standalone side call (unrecorded ${context.systemPrompt?.length}-char prompt, no tools) routed to isolated path, msgs=${context.messages.length}`);
+		return sideCallStreamFn(model, context, options);
 	}
 
 	const stream = newAssistantMessageEventStream();

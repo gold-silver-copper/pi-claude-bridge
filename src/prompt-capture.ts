@@ -184,6 +184,18 @@ export class PromptCaptures {
 		return { assembledPrompt: systemPrompt, custom: systemPrompt, contextFiles: [], skills: [], inherited: embedded };
 	}
 
+	/** Whether `resolveOrDerive` would account for this prompt — by exact key, a revived
+	 *  evicted node, or embedded captures — without its diagnostic or recency side effects.
+	 *  An absent prompt counts: `resolveOrDerive` returns nothing for it rather than throwing.
+	 *
+	 *  Lets the provider tell a turn whose prompt we lost track of (which must still throw)
+	 *  from a standalone side call that never went through the agent loop at all. */
+	accounts(systemPrompt?: string): boolean {
+		if (!systemPrompt || this.captures.has(systemPrompt)) return true;
+		if (this.reachableCaptures().some((node) => node.assembledPrompt === systemPrompt)) return true;
+		return this.findInheritedPrompts(systemPrompt, systemPrompt).length > 0;
+	}
+
 	get size(): number {
 		return this.captures.size;
 	}
