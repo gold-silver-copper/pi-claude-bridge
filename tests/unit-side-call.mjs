@@ -154,3 +154,27 @@ describe("provider routing", () => {
 		);
 	});
 });
+
+describe("sharedPromptCaptures across /reload", () => {
+	it("upgrades a registry left behind by an older bridge in place", async () => {
+		const { sharedPromptCaptures } = await import("../src/prompt-capture.js");
+		const key = Symbol.for("claude-bridge:promptCaptures");
+		const saved = globalThis[key];
+		try {
+			// What the previous module evaluation left on globalThis: same fields, a class
+			// that predates accounts().
+			class OldPromptCaptures extends PromptCaptures {}
+			OldPromptCaptures.prototype.accounts = undefined;
+			const old = new OldPromptCaptures();
+			old.record(PI_PROMPT, { contextFiles: [], skills: [] });
+			globalThis[key] = old;
+
+			const shared = sharedPromptCaptures();
+			assert.equal(shared, old, "the same registry object stays shared");
+			assert.equal(shared.accounts(PI_PROMPT), true, "captures recorded before the reload survive");
+			assert.equal(shared.accounts(BTW_PROMPT), false);
+		} finally {
+			globalThis[key] = saved;
+		}
+	});
+});

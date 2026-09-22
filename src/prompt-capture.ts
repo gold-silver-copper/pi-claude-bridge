@@ -264,7 +264,25 @@ const SHARED_CAPTURES_KEY = Symbol.for("claude-bridge:promptCaptures");
  *  keys carry identical portable parts, so cross-session reuse is safe. */
 export function sharedPromptCaptures(onDiagnose?: (diagnostic: PromptCaptureDiagnostic) => void): PromptCaptures {
 	const globals = globalThis as Record<symbol, PromptCaptures | undefined>;
-	return (globals[SHARED_CAPTURES_KEY] ??= new PromptCaptures(256, onDiagnose));
+	const existing = globals[SHARED_CAPTURES_KEY];
+	if (!existing) return (globals[SHARED_CAPTURES_KEY] = new PromptCaptures(256, onDiagnose));
+	// The instance outlives the module: after /reload into a newer bridge it still carries
+	// the old class's methods, and calling one added since fails every turn ("accounts is
+	// not a function"). Re-point it at this class rather than replacing it, so other
+	// module instances holding it keep sharing one registry and its captures survive.
+	// Duck-typed, not instanceof: sub-agents re-evaluate this module, and an identical
+	// class from another evaluation needs no upgrade.
+	// Compared by descriptor so getters (`size`) never run against the bare prototype.
+	const stale = Object.getOwnPropertyNames(PromptCaptures.prototype).some((name) => {
+		const want = Object.getOwnPropertyDescriptor(PromptCaptures.prototype, name);
+		let have: PropertyDescriptor | undefined;
+		for (let proto = Object.getPrototypeOf(existing); proto && !have; proto = Object.getPrototypeOf(proto)) {
+			have = Object.getOwnPropertyDescriptor(proto, name);
+		}
+		return typeof have?.value !== typeof want?.value || typeof have?.get !== typeof want?.get;
+	});
+	if (stale) Object.setPrototypeOf(existing, PromptCaptures.prototype);
+	return existing;
 }
 
 export function projectPromptCapture(
