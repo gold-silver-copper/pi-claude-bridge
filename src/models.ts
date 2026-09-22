@@ -5,6 +5,9 @@
 // `resolveModel` resolves family shortcuts (opus/sonnet/fable) to the newest
 // matching id regardless of sort order; sort order only drives picker display.
 
+import { existsSync, readFileSync } from "fs";
+import { join } from "path";
+
 const TWO_HUNDRED_K_CONTEXT = 200_000;
 const ONE_M_CONTEXT = 1_000_000;
 
@@ -27,6 +30,38 @@ const FAMILY_ORDER = ["fable", "opus", "sonnet", "haiku"];
 function versionRank(id: string): { family: string; tuple: [number, number] } {
 	const [, family, major, minor] = id.split("-");
 	return { family, tuple: [Number(major) || 0, Number(minor) || 0] };
+}
+
+// pi-ai's `getModels("anthropic")` is a *generated snapshot*, pinned to the
+// installed pi-ai version. pi separately refreshes Anthropic's live catalog
+// into <agentDir>/models-store.json, and that is where a newly released model
+// shows up first: Opus 5.5 is in the store but absent from pi-ai 0.87.0's
+// snapshot, so a catalog-only picker would never offer it even though pi's own
+// provider lists it.
+//
+// Merging the store back in keeps this module's no-per-model-code rule: every
+// future model arrives the same way, with no release needed here.
+export function readAnthropicStoreModels(agentDir: string): any[] {
+	const path = join(agentDir, "models-store.json");
+	if (!existsSync(path)) return [];
+	try {
+		const models = JSON.parse(readFileSync(path, "utf-8"))?.anthropic?.models;
+		// Entries must at least carry an id; anything else is pi's business.
+		return Array.isArray(models) ? models.filter((m) => m && typeof m.id === "string") : [];
+	} catch (e) {
+		// The store is an optimization, never a dependency: a torn write or a
+		// shape change must not take the picker down with it.
+		console.error(`claude-bridge: ignoring unreadable ${path}: ${e}`);
+		return [];
+	}
+}
+
+// Builtin catalog wins on conflict — it is the version the installed pi-ai was
+// tested against; the store only contributes ids the snapshot has not caught up
+// to yet. Ordering is irrelevant: buildModels sorts.
+export function mergeStoreModels<T extends { id: string }>(builtin: T[], store: T[]): T[] {
+	const known = new Set(builtin.map((m) => m.id));
+	return [...builtin, ...store.filter((m) => !known.has(m.id))];
 }
 
 export function buildModels<T extends { id: string; [key: string]: any }>(piAiModels: T[]) {
@@ -81,6 +116,7 @@ export type ClaudeCodeRuntimeModel = {
 const MEASURED_ONE_M = new Set([
 	"claude-fable-5",
 	"claude-fable-5-1",
+	"claude-opus-5-5",
 	"claude-opus-5",
 	"claude-opus-4-8",
 	"claude-opus-4-7",
@@ -121,6 +157,30 @@ export function resolveClaudeCodeRuntimeModel(
 
 export function claudeCodeModelId(model: { id: string }, settings: LongContextSettings): string {
 	return resolveClaudeCodeRuntimeModel(model, settings).cliModelId;
+}
+
+// Generic level→effort table for models pi-ai ships no thinkingLevelMap for (or
+// levels the map omits). "max" is absent on purpose: only a model that maps it
+// explicitly can request it.
+const REASONING_TO_EFFORT: Record<string, string> = {
+	minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "max",
+};
+
+// Resolve a pi reasoning level to the effort passed to Claude Code.
+//
+// A model's own thinkingLevelMap wins when it *has an entry* for the level —
+// including an entry whose value is null, which means "no thinking at this
+// level" and must not fall through to the generic table. opus-5-5 is the first
+// model to map a non-off level that way (minimal→null); reading that as "unset"
+// would silently turn thinking on where the catalog asked for none.
+export function resolveEffort(
+	model: { thinkingLevelMap?: Record<string, string | null> | null } | undefined,
+	level: string | undefined,
+): string | undefined {
+	if (!level || level === "off") return undefined;
+	const map = model?.thinkingLevelMap;
+	if (map && level in map) return map[level] ?? undefined;
+	return REASONING_TO_EFFORT[level];
 }
 
 export function resolveModel<T extends { id: string }>(models: T[], input: string): T | undefined {

@@ -2,12 +2,17 @@
  * Tests for MODELS construction + resolveModel.
  * Pins: catalog-driven picker excludes pi-ai's dated snapshot aliases, family
  * shortcuts resolve newest-first regardless of sort order, projection strips
- * pi-ai's baseUrl/api/provider/headers, and the runtime policy gates [1m] ids
- * on measurement and plan settings.
+ * pi-ai's baseUrl/api/provider/headers, the runtime policy gates [1m] ids
+ * on measurement and plan settings, models newer than pi-ai's pinned snapshot
+ * are picked up from pi's models-store.json, and a model's own thinkingLevelMap
+ * decides effort (including entries that map a level to "no thinking").
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { applyLongContext, buildModels, claudeCodeModelId, resolveClaudeCodeRuntimeModel, resolveModel } from "../src/models.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { applyLongContext, buildModels, claudeCodeModelId, mergeStoreModels, readAnthropicStoreModels, resolveClaudeCodeRuntimeModel, resolveEffort, resolveModel } from "../src/models.js";
 import { getModels } from "@earendil-works/pi-ai/compat";
 
 const PRO = { plan: "pro", longContextExtraUsage: false };
@@ -91,7 +96,7 @@ describe("resolveModel", () => {
 
 describe("Claude Code runtime policy", () => {
 	it("measured-1M ids send [1m] on every plan", () => {
-		for (const id of ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-fable-5", "claude-fable-5-1", "claude-sonnet-5"]) {
+		for (const id of ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-fable-5", "claude-fable-5-1", "claude-sonnet-5"]) {
 			assert.deepEqual(resolveClaudeCodeRuntimeModel(oneM(id), PRO), { cliModelId: `${id}[1m]`, contextWindow: 1000000 });
 		}
 	});
@@ -179,5 +184,104 @@ describe("applyLongContext", () => {
 
 		const extra = applyLongContext(models, EXTRA);
 		assert.equal(find(extra, "claude-sonnet-4-6").name, "Claude Sonnet 4.6 1M");
+	});
+});
+
+describe("models-store merge", () => {
+	// pi-ai's builtin catalog is a snapshot pinned to the installed pi-ai, so a
+	// model released after it (Opus 5.5 vs pi-ai 0.87.0) only exists in pi's
+	// refreshed models-store.json. Without the merge it never reaches the picker.
+	const storeEntry = (id) => ({ ...mockPiAiModel(id), contextWindow: 1000000 });
+
+	it("adds store-only ids the pinned catalog has not caught up to", () => {
+		const merged = mergeStoreModels([mockPiAiModel("claude-opus-5")], [storeEntry("claude-opus-5-5")]);
+		assert.deepEqual(merged.map((m) => m.id), ["claude-opus-5", "claude-opus-5-5"]);
+	});
+
+	it("builtin entry wins on conflict — the store never rewrites a pinned model", () => {
+		const builtin = mockPiAiModel("claude-opus-5", { name: "builtin" });
+		const merged = mergeStoreModels([builtin], [mockPiAiModel("claude-opus-5", { name: "store" })]);
+		assert.deepEqual(merged.map((m) => m.name), ["builtin"]);
+	});
+
+	it("a store-only model reaches the picker sorted and labelled like any other", () => {
+		const models = buildModels(mergeStoreModels(
+			[oneM("claude-opus-5"), mockPiAiModel("claude-haiku-4-5")],
+			[{ ...storeEntry("claude-opus-5-5"), name: "Claude Opus 5.5" }],
+		));
+		// Newest opus first, and the family shortcut follows the store model.
+		assert.deepEqual(models.map((m) => m.id), ["claude-opus-5-5", "claude-opus-5", "claude-haiku-4-5"]);
+		assert.equal(resolveModel(models, "opus")?.id, "claude-opus-5-5");
+		// Measured 1M (diag/CONTEXT-SIZE.md): registered at 1M and sent as [1m].
+		const registered = applyLongContext(models, MAX);
+		assert.equal(find(registered, "claude-opus-5-5").contextWindow, 1000000);
+		assert.equal(find(registered, "claude-opus-5-5").name, "Claude Opus 5.5 1M");
+		assert.equal(claudeCodeModelId({ id: "claude-opus-5-5" }, MAX), "claude-opus-5-5[1m]");
+	});
+
+	it("an exact id still beats the newer partial match (claude-opus-5 ≠ 5.5)", () => {
+		const models = buildModels(mergeStoreModels([oneM("claude-opus-5")], [storeEntry("claude-opus-5-5")]));
+		assert.equal(resolveModel(models, "claude-opus-5")?.id, "claude-opus-5");
+	});
+});
+
+describe("readAnthropicStoreModels", () => {
+	const withStore = (contents) => {
+		const dir = mkdtempSync(join(tmpdir(), "models-store-"));
+		if (contents !== undefined) writeFileSync(join(dir, "models-store.json"), contents);
+		try { return readAnthropicStoreModels(dir); } finally { rmSync(dir, { recursive: true, force: true }); }
+	};
+
+	it("reads pi's store shape ({ anthropic: { models: [...] } })", () => {
+		const models = withStore(JSON.stringify({
+			anthropic: { models: [{ id: "claude-opus-5-5", name: "Claude Opus 5.5" }], checkedAt: 1, etag: "x" },
+			openai: { models: [{ id: "gpt-9" }] },
+		}));
+		assert.deepEqual(models.map((m) => m.id), ["claude-opus-5-5"]);
+	});
+
+	// The store is an optimization, never a dependency: every degraded shape
+	// must fall back to the pinned catalog rather than take the picker down.
+	it("tolerates a missing, unparseable, or unexpected store", () => {
+		assert.deepEqual(withStore(undefined), []);
+		assert.deepEqual(withStore("{ truncated"), []);
+		assert.deepEqual(withStore(JSON.stringify({})), []);
+		assert.deepEqual(withStore(JSON.stringify({ anthropic: { models: "nope" } })), []);
+	});
+
+	it("drops entries without a usable id", () => {
+		const models = withStore(JSON.stringify({ anthropic: { models: [null, { name: "no id" }, { id: 7 }, { id: "claude-opus-5-5" }] } }));
+		assert.deepEqual(models.map((m) => m.id), ["claude-opus-5-5"]);
+	});
+});
+
+describe("resolveEffort", () => {
+	// Opus 5.5 is the first model to map a non-"off" level to null, meaning
+	// "no thinking at this level". Reading null as "unset" would fall through to
+	// the generic table and silently turn thinking on where none was asked for.
+	const opus55 = { thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" } };
+
+	it("honours a null map entry as 'no thinking', not as 'unmapped'", () => {
+		assert.equal(resolveEffort(opus55, "minimal"), undefined);
+	});
+
+	it("uses the model's own mapping over the generic table", () => {
+		assert.equal(resolveEffort(opus55, "xhigh"), "xhigh");
+		assert.equal(resolveEffort(opus55, "max"), "max");
+		// Generic table would have said xhigh→max.
+		assert.equal(resolveEffort(undefined, "xhigh"), "max");
+	});
+
+	it("falls back to the generic table for models with no map, or unmapped levels", () => {
+		assert.equal(resolveEffort(undefined, "minimal"), "low");
+		assert.equal(resolveEffort({ thinkingLevelMap: { max: "max" } }, "high"), "high");
+		// "max" is absent from the generic table: only an explicit map may ask for it.
+		assert.equal(resolveEffort(undefined, "max"), undefined);
+	});
+
+	it("treats off/absent levels as no effort", () => {
+		assert.equal(resolveEffort(opus55, "off"), undefined);
+		assert.equal(resolveEffort(opus55, undefined), undefined);
+		assert.equal(resolveEffort(undefined, undefined), undefined);
 	});
 });

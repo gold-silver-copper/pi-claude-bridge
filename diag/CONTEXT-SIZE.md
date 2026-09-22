@@ -11,8 +11,12 @@ details. Auth is subscription OAuth (claude.ai), no `ANTHROPIC_API_KEY`.
 
 ```
 node diag/context-size.mjs pro        # current tier (pro | max)
-node diag/context-size.mjs --compare  # diff latest pro-* vs max-* JSON
+node diag/context-size.mjs max --models=claude-opus-5-5   # just the new id
+node diag/context-size.mjs --compare  # diff latest full pro-* vs max-* JSON
 ```
+
+`--compare` only considers runs that covered the whole model list, so a
+`--models=` run cannot be mistaken for a plan's full result.
 
 Raw JSON + MD per run save to `.test-output/context-size/` (gitignored).
 
@@ -32,6 +36,8 @@ the footnote below the table).
 
 | requested id              | Pro, credits off | Pro, credits on | Max, credits off | Max, credits on |
 |---------------------------|------------------|-----------------|------------------|-----------------|
+| `claude-opus-5-5`         | —                | —               | 1M‡              | —               |
+| `claude-opus-5-5[1m]`    | —                | —               | 1M‡              | —               |
 | `claude-opus-5`           | —                | —               | 200K             | —               |
 | `claude-opus-5[1m]`      | —                | —               | 1M               | —               |
 | `claude-opus-4-8`         | 200K             | 200K            | 200K             | 200K            |
@@ -53,6 +59,16 @@ Raw runs: `.test-output/context-size/{pro,max}-2026-06-26T21-*.json`
 
 `—` = not yet tested in that condition. Max-credits-on matched Pro-credits-on
 for every cell tested in both (shown for completeness).
+
+‡ **Opus 5.5, measured 2026-09-22** on SDK 0.3.280 (CC 2.1.280), Max plan,
+credits off. Both the bare id and `[1m]` served 1M/128K output, like Opus 4.7.
+It is registered via `MEASURED_ONE_M` (so the bridge sends `[1m]`) on the
+strength of the Max measurement only — Pro is untested, same as the Opus 5 row
+above it. **Requires Claude Code ≥ 2.1.280**: 2.1.267 rejects both variants with
+`400 Claude Code 2.1.267 does not support this model; version 2.1.280 or newer
+is required`, which is a hard failure, not a 200K fallback. Note this model is
+absent from pi-ai 0.87.0's pinned catalog and reaches the picker only through
+the `models-store.json` merge in `src/models.ts`.
 
 † **Inferred, not directly measured.** The Pro-credits-off run predates
 error-field capture; its three rejected `[1m]` rows have no recorded HTTP status

@@ -25,7 +25,11 @@ const DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OUTDIR = join(DIR, ".test-output", "context-size");
 mkdirSync(OUTDIR, { recursive: true });
 
-const MODELS = ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-fable-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5"];
+const ALL_MODELS = ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-fable-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5"];
+// --models=a,b restricts the run to a subset — adding one new model id costs two
+// calls instead of re-probing (and re-spending on) the whole catalog.
+const modelsArg = process.argv.slice(2).find((a) => a.startsWith("--models="));
+const MODELS = modelsArg ? modelsArg.slice("--models=".length).split(",").filter(Boolean) : ALL_MODELS;
 const VARIANTS = ["bare", "1m"];
 const PER_CALL_MS = 120_000;
 const PROMPT = 'Reply with just the word "yes".';
@@ -157,9 +161,17 @@ async function run(plan) {
 	console.log(mdTable(rows));
 }
 
+// Latest *full-catalog* run: a --models= run covers a subset, so comparing it
+// against a full run of the other plan would read as "rows disappeared".
 function latestJson(prefix) {
 	const files = readdirSync(OUTDIR).filter((f) => f.startsWith(`${prefix}-`) && f.endsWith(".json")).sort();
-	return files.length ? join(OUTDIR, files[files.length - 1]) : null;
+	for (let i = files.length - 1; i >= 0; i--) {
+		try {
+			const rep = JSON.parse(readFileSync(join(OUTDIR, files[i]), "utf8"));
+			if (ALL_MODELS.every((m) => rep.models?.includes(m))) return join(OUTDIR, files[i]);
+		} catch {}
+	}
+	return null;
 }
 
 function compare() {
@@ -181,6 +193,6 @@ function compare() {
 	}
 }
 
-const arg = process.argv[2];
+const arg = process.argv.slice(2).find((a) => !a.startsWith("--models="));
 if (arg === "--compare") compare();
 else run(arg ?? "pro");

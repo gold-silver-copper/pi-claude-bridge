@@ -25,13 +25,15 @@ Requires pi 0.85.0 or newer (`pi-ai`, `pi-coding-agent`, `pi-tui`); pi 0.86 need
 
 ## Provider
 
-Use `/model` to select any Claude model in pi-ai's catalog, e.g. `claude-bridge/claude-fable-5-1`, `claude-bridge/claude-opus-5`, or `claude-bridge/claude-haiku-4-5`.
+Use `/model` to select any Claude model in pi-ai's catalog, e.g. `claude-bridge/claude-fable-5-1`, `claude-bridge/claude-opus-5-5`, or `claude-bridge/claude-haiku-4-5`.
 
 Behind the scenes, pi's tools are bridged to Claude Code but it should all work like normal in pi. Bash commands get a 120-second default timeout (matching Claude Code's default) since pi's bash has no timeout by default. Skills in pi are copied over to Claude Code's system prompt so should work as they would with any other pi provider. Steering works mid-turn: a message sent while Claude is running a tool reaches it at that tool boundary, not after the whole turn finishes.
 
-The model list comes from pi-ai's Anthropic catalog automatically — when pi-ai adds a new Claude model, it appears in `/model` after updating the package, no bridge update needed. Dated snapshot ids (e.g. `claude-opus-4-5-20251101`) are not shown. Selection by shortcut or partial id always prefers an exact match first, then the newest version of the matching family.
+The model list comes from pi-ai's Anthropic catalog automatically — when pi-ai adds a new Claude model, it appears in `/model`, no bridge update needed. pi-ai's catalog is a snapshot pinned to the installed pi-ai version, so the bridge also merges the live catalog pi refreshes into `~/.pi/agent/models-store.json`: a model Anthropic ships before pi-ai's next release (Opus 5.5, against pi-ai 0.87.0) still shows up. Dated snapshot ids (e.g. `claude-opus-4-5-20251101`) are not shown. Selection by shortcut or partial id always prefers an exact match first, then the newest version of the matching family — so `opus` now resolves to Opus 5.5, while `claude-opus-5` still gives you exactly Opus 5.
 
-**1M Context:** 1M is enabled per a *measured* list — models verified to serve 1M through the SDK on every plan (Fable 5/5.1, Opus 5/4.8/4.7, Sonnet 5). A new model appearing from pi-ai starts at 200K context until it's measured and added to that list, so no model can 400/429 its way through every turn. Opus 4.6 only gets 1M if you're on a Max plan or pay for Extra Usage. Sonnet 4.6 only gets 1M if you pay for Extra Usage. You will need to set `provider.plan` and/or `provider.longContextExtraUsage` for 1M context in Opus 4.6/Sonnet 4.6 as described in [Configuration](#configuration).
+**Note:** Opus 5.5 requires Claude Code 2.1.280 or newer. Older versions reject it with `400 ... does not support this model`; run `claude update` (the bridge runs your own `claude` binary when `provider.pathToClaudeCodeExecutable` is set, so updating the SDK alone is not enough).
+
+**1M Context:** 1M is enabled per a *measured* list — models verified to serve 1M through the SDK on every plan (Fable 5/5.1, Opus 5.5/5/4.8/4.7, Sonnet 5). A new model appearing from pi-ai starts at 200K context until it's measured and added to that list, so no model can 400/429 its way through every turn. Opus 4.6 only gets 1M if you're on a Max plan or pay for Extra Usage. Sonnet 4.6 only gets 1M if you pay for Extra Usage. You will need to set `provider.plan` and/or `provider.longContextExtraUsage` for 1M context in Opus 4.6/Sonnet 4.6 as described in [Configuration](#configuration).
 
 ## AskClaude Tool
 
