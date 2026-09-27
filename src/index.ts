@@ -1646,14 +1646,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// 2. Fresh child context — constructor already gave us clean Maps and empty
 	//    arrays. For a reused top-level context, clear explicitly.
 	claimCurrentPiStream(stream, "fresh-query", queryCtx);
-	queryCtx.pendingToolCalls.clear();
-	queryCtx.pendingResults.clear();
-	// Stale ids would let a late result from the previous query route here via
-	// contextForToolResults — which now means pushing its steer into this
-	// query's stdin, not just mismatching a map.
-	queryCtx.turnToolCallIds = [];
-	queryCtx.resetTurnState(model);
-	queryCtx.latestCursor = 0;
+	queryCtx.resetQueryState(model);
 
 	const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
 	// cliModel is the actual id sent to Claude Code (may carry [1m]); model.id is the

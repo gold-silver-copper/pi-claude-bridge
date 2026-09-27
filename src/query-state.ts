@@ -62,6 +62,22 @@ export class QueryContext {
 		this.pendingResults.clear();
 	}
 
+	/** Clear what the previous query left behind before this context serves a new one.
+	 *  The top-level context is reused for every prompt, so an Esc on an earlier query
+	 *  must not leave abortRequested set: every later turn would end as aborted. */
+	resetQueryState(model: Model<any>): void {
+		this.pendingToolCalls.clear();
+		this.pendingResults.clear();
+		// Stale ids would let a late result from the previous query route here via
+		// contextForToolResults — which now means pushing its steer into this
+		// query's stdin, not just mismatching a map.
+		this.turnToolCallIds = [];
+		this.abortRequested = false;
+		this.requestAbort = null;
+		this.resetTurnState(model);
+		this.latestCursor = 0;
+	}
+
 	resetTurnState(model: Model<any>): void {
 		this.turnOutput = {
 			role: "assistant", content: [],

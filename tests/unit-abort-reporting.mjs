@@ -72,6 +72,29 @@ describe("an interrupted query", () => {
 	});
 });
 
+describe("a query after an aborted one", () => {
+	it("finishes as stop once the reused context starts a new query", () => {
+		const c = makeCtx();
+		c.abortRequested = true;
+		c.requestAbort = () => {};
+		c.resetQueryState(fakeModel);
+		assert.strictEqual(c.abortRequested, false);
+		assert.strictEqual(c.requestAbort, null);
+		const stream = c.currentPiStream;
+		__test.finalizeCurrentStream(c, "stop");
+		assert.ok(!stream.events.some((e) => e.type === "error"));
+		assert.strictEqual(c.turnOutput.stopReason, "stop");
+	});
+
+	it("keeps a genuine failure an error rather than a stale abort", async () => {
+		const c = makeCtx();
+		c.abortRequested = true;
+		c.resetQueryState(fakeModel);
+		await consume(c, [{ ...abortedResult, errors: ["API Error: 500 Internal Server Error"] }]);
+		assert.strictEqual(c.turnOutput.stopReason, "error");
+	});
+});
+
 describe("watchStreamAbort", () => {
 	it("marks the query and tears it down when the call's signal aborts later", () => {
 		const c = new QueryContext();
