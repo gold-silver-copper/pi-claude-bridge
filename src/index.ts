@@ -497,7 +497,11 @@ async function runIsolatedSummary(
 		const compactProviderSettings = loadConfig(cwd).provider;
 		const claudeExecutable = compactProviderSettings?.pathToClaudeCodeExecutable;
 		const cliModel = claudeCodeModelId(model, longContextSettings);
-		debug(`${label}: spawn model=${cliModel} registeredModel=${model.id} promptLen=${promptText.length}`);
+		// A side call carries the caller's thinking level (pi-btw's thread level); summaries
+		// keep sending exactly what they always have, so they get no effort.
+		const effort = kind === "side call" ? resolveEffort(model as any, options?.reasoning) as EffortLevel | undefined : undefined;
+		const effortLog = kind === "side call" ? ` effort=${effort ?? "default"}` : "";
+		debug(`${label}: spawn model=${cliModel} registeredModel=${model.id} promptLen=${promptText.length}${effortLog}`);
 
 		sdkQuery = query({
 			prompt: promptText,
@@ -513,6 +517,7 @@ async function runIsolatedSummary(
 				systemPrompt: context.systemPrompt,
 				model: cliModel,
 				maxTurns: 1,
+				...(effort ? { effort } : {}),
 				...(claudeExecutable ? { pathToClaudeCodeExecutable: claudeExecutable } : {}),
 				...makeCliDebugOptions(label.replace(" ", "-")),
 			},

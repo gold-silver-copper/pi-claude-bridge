@@ -146,6 +146,38 @@ describe("provider routing", () => {
 		assert.equal(__test.getSharedSession(), shared);
 	});
 
+	async function launch(callModel, context, options) {
+		rmSync(argvPath, { force: true });
+		for await (const _event of __test.streamClaudeAgentSdk(callModel, context, { cwd, ...options })) { /* drain */ }
+		return readFileSync(argvPath, "utf8").split("\n");
+	}
+	const effortOf = (argv) => (argv.includes("--effort") ? argv[argv.indexOf("--effort") + 1] : undefined);
+	const btw = (question = "how close are we?") => ({ systemPrompt: BTW_PROMPT, messages: [user(question)] });
+
+	it("passes the side thread's thinking level to Claude Code as --effort", async () => {
+		assert.equal(effortOf(await launch(model, btw(), { reasoning: "low" })), "low");
+		assert.equal(effortOf(await launch(model, btw(), { reasoning: "high" })), "high");
+	});
+
+	it("sends no --effort for thinking off or no thinking level", async () => {
+		assert.equal(effortOf(await launch(model, btw(), { reasoning: "off" })), undefined);
+		assert.equal(effortOf(await launch(model, btw(), {})), undefined);
+	});
+
+	it("honours a model's thinkingLevelMap, including a level mapped to no thinking", async () => {
+		const mapped = { ...model, thinkingLevelMap: { minimal: null, xhigh: "xhigh" } };
+		assert.equal(effortOf(await launch(mapped, btw(), { reasoning: "minimal" })), undefined);
+		assert.equal(effortOf(await launch(mapped, btw(), { reasoning: "xhigh" })), "xhigh");
+	});
+
+	it("leaves one-off summary calls exactly as they were", async () => {
+		const summary = { systemPrompt: "Summarize the conversation.", messages: [user("<conversation>...</conversation>")] };
+		const plain = await launch(model, summary, { cacheRetention: "none" });
+		const withLevel = await launch(model, summary, { cacheRetention: "none", reasoning: "high" });
+		assert.equal(effortOf(withLevel), undefined);
+		assert.deepEqual(withLevel, plain);
+	});
+
 	it("still throws for a tooled turn whose prompt it cannot account for", () => {
 		__test.resetSharedSession();
 		assert.throws(
