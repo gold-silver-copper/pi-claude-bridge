@@ -19,6 +19,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 const { default: activate, __test } = await import("../src/index.js");
+const { projectPromptCapture } = await import("../src/prompt-capture.js");
 
 function activateWithMockPi() {
 	const handlers = new Map();
@@ -112,5 +113,22 @@ describe("turn_start prompt capture", () => {
 
 		assert.ok(__test.promptCaptures.resolve(WIDENED), "the prompt still resolves");
 		assert.equal(__test.promptCaptures.size, before, "re-firing an unchanged prompt must not grow the registry");
+	});
+
+	it("forwards a section another extension adds after the bridge's before_agent_start", () => {
+		const handlers = activateWithMockPi();
+		const options = { contextFiles: [], skills: [], selectedTools: ["read"], sections: {} };
+		// The bridge's handler runs first and sees the prompt without the section …
+		handlers.get("before_agent_start")({ systemPrompt: PRE_WIDEN, systemPromptOptions: options });
+		// … then a later extension (pi-design-lab's interviewer) adds its section to the same options object.
+		options.sections["design-interviewer"] = "You are interviewing the user.";
+		const final = `${WIDENED}\n\n<design-interviewer>\nYou are interviewing the user.\n</design-interviewer>`;
+		handlers.get("agent_start")({}, { getSystemPrompt: () => final });
+
+		const projected = projectPromptCapture(__test.promptCaptures.resolveOrDerive(final), { skillReadTool: "mcp" });
+		assert.match(projected, /<design-interviewer>\nYou are interviewing the user\.\n<\/design-interviewer>/,
+			"the section must reach Claude Code's appended prompt");
+		const early = projectPromptCapture(__test.promptCaptures.resolve(PRE_WIDEN), { skillReadTool: "mcp" }) ?? "";
+		assert.doesNotMatch(early, /design-interviewer/, "the pre-section record stays as it was");
 	});
 });

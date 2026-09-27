@@ -2099,6 +2099,9 @@ export default function (pi: ExtensionAPI) {
 	// The options (custom/append/contextFiles/skills) are pi config, stable across a
 	// turn; only the auto-generated tool list in the rendered prompt varies. Stash them
 	// at before_agent_start so the agent_start recording below can reuse them.
+	// Extension sections are the exception: handlers that run after ours add them to
+	// this same options object, so the before_agent_start record lacks them and the
+	// agent_start/turn_start records (keyed on the final prompt) carry them.
 	type RecordOptions = Parameters<typeof recordSystemPrompt>[2];
 	let lastSystemPromptOptions: RecordOptions | undefined;
 	function recordSystemPrompt(source: string, systemPrompt: string | undefined, options: {
@@ -2107,6 +2110,7 @@ export default function (pi: ExtensionAPI) {
 		contextFiles?: { path: string; content: string }[];
 		skills?: Parameters<typeof promptCaptures.record>[1]["skills"];
 		selectedTools?: string[];
+		sections?: Record<string, string>;
 	} | undefined) {
 		if (!systemPrompt) return;
 		const hasRead = !options?.selectedTools || options.selectedTools.includes("read");
@@ -2115,6 +2119,7 @@ export default function (pi: ExtensionAPI) {
 			append: options?.appendSystemPrompt,
 			contextFiles: options?.contextFiles ?? [],
 			skills: hasRead ? options?.skills ?? [] : [],
+			sections: options?.sections,
 		}, source);
 	}
 	pi.on("before_agent_start", (event) => {

@@ -281,3 +281,33 @@ describe("capture provenance", () => {
 		);
 	});
 });
+
+describe("extension prompt sections", () => {
+	it("projects each section the way pi renders it, after the append text", () => {
+		const captures = new PromptCaptures();
+		captures.record("key", capture({ append: "appended", sections: { "design-interviewer": "Ask one question at a time.", empty: "" } }));
+
+		assert.equal(project(captures, "key"), "appended\n\n<design-interviewer>\nAsk one question at a time.\n</design-interviewer>");
+	});
+
+	it("copies sections at record time, since pi keeps mutating the options object", () => {
+		const captures = new PromptCaptures();
+		const sections = {};
+		captures.record("before", capture({ sections }));
+		sections.late = "added by a later handler";
+		captures.record("after", capture({ sections }));
+
+		assert.equal(project(captures, "before"), undefined, "the earlier record must not gain the later section");
+		assert.match(project(captures, "after"), /<late>\nadded by a later handler\n<\/late>/);
+	});
+
+	it("does not repeat a section a child also inherits from its parent", () => {
+		const captures = new PromptCaptures();
+		captures.record(PARENT_KEY, capture({ sections: { rules: "shared rules" } }));
+		captures.record(CHILD_KEY, capture({ custom: `${PARENT_KEY}${CHILD_SUFFIX}`, sections: { rules: "shared rules", own: "child only" } }));
+
+		const projected = project(captures, CHILD_KEY);
+		assert.equal(occurrences(projected, "<rules>"), 1, "inherited section appears once, through the parent");
+		assert.equal(occurrences(projected, "<own>"), 1, "a child-only section is kept");
+	});
+});

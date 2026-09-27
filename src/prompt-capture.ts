@@ -10,6 +10,8 @@ export type PromptCaptureInput = {
 	append?: string;
 	contextFiles: { path: string; content: string }[];
 	skills: Skill[];
+	/** Named prompt sections extensions add through `systemPromptOptions.sections`. */
+	sections?: Record<string, string>;
 };
 
 type InheritedPrompt = {
@@ -86,6 +88,9 @@ export class PromptCaptures {
 		capture.append = input.append;
 		capture.contextFiles = input.contextFiles.map((file) => ({ ...file }));
 		capture.skills = [...input.skills];
+		// Copied, not referenced: pi hands every before_agent_start handler the same
+		// options object, and later handlers keep mutating it after this record.
+		capture.sections = { ...(input.sections ?? {}) };
 		capture.source = source;
 		if (!existing || customChanged) {
 			capture.inherited = this.findInheritedPrompts(systemPrompt, input.custom);
@@ -317,6 +322,23 @@ export function collectPromptSkills(capture: PromptCapture): Skill[] {
 	return result;
 }
 
+/** Extension sections visible through a capture and its ancestors, ancestor first. */
+function collectPromptSections(capture: PromptCapture, visiting = new Set<PromptCapture>()): Array<[string, string]> {
+	if (visiting.has(capture)) throw new Error("Cyclic prompt inheritance");
+	visiting.add(capture);
+	try {
+		const inherited = capture.inherited.flatMap((edge) => collectPromptSections(edge.parent, visiting));
+		return [...inherited, ...Object.entries(capture.sections ?? {}).filter(([, content]) => Boolean(content))];
+	} finally {
+		visiting.delete(capture);
+	}
+}
+
+/** The way pi renders an extension section into its own prompt. */
+function renderSection(name: string, content: string): string {
+	return `<${name}>\n${content}\n</${name}>`;
+}
+
 function projectCapture(
 	capture: PromptCapture,
 	options: { skillReadTool: SkillReadTool },
@@ -337,12 +359,27 @@ function projectCapture(
 			return true;
 		});
 
+		// A child embedding its parent's prompt already carries the parent's sections
+		// through the inheritance edge; the same extension adding the same section to
+		// the child must not repeat it.
+		const inheritedSections = new Map<string, Set<string>>();
+		for (const edge of capture.inherited) {
+			for (const [name, content] of collectPromptSections(edge.parent)) {
+				if (!inheritedSections.has(name)) inheritedSections.set(name, new Set());
+				inheritedSections.get(name)!.add(content);
+			}
+		}
+		const ownSections = Object.entries(capture.sections ?? {}).filter(
+			([name, content]) => content && !inheritedSections.get(name)?.has(content),
+		);
+
 		const custom = projectCustom(capture, options, visiting);
 		const parts = [
 			formatProjectContext(capture.contextFiles),
 			renderSkillsBlock(ownSkills, options.skillReadTool),
 			custom,
 			capture.append,
+			...ownSections.map(([name, content]) => renderSection(name, content)),
 		].filter((part): part is string => Boolean(part));
 		return parts.length > 0 ? parts.join("\n\n") : undefined;
 	} finally {
