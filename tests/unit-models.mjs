@@ -85,8 +85,8 @@ describe("MODELS projection", () => {
 describe("resolveModel", () => {
 	const models = buildModels(getModels("anthropic"));
 
-	it("opus shortcut resolves to claude-opus-5 (newest opus)", () => {
-		assert.equal(resolveModel(models, "opus")?.id, "claude-opus-5");
+	it("opus shortcut resolves to claude-opus-5-5 (newest opus)", () => {
+		assert.equal(resolveModel(models, "opus")?.id, "claude-opus-5-5");
 	});
 
 	it("exact id beats newer partial match (claude-fable-5 → fable-5, not 5-1)", () => {
