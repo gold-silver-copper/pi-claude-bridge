@@ -34,6 +34,11 @@ export class QueryContext {
 	/** Highest 5% utilization bucket we notified for, so repeat rate_limit_event spam is suppressed. */
 	lastRateLimitWarnStep: number | null = null;
 	lastRateLimitWarnThreshold: number | undefined;
+	/** Set once pi aborted any stream this query served (the user pressed Esc). Every
+	 *  later failure of the query is then an abort, whatever text Claude Code sends. */
+	abortRequested = false;
+	/** Tears the query down: settles the prompt stream and parked handlers, stops CC. */
+	requestAbort: (() => void) | null = null;
 
 	// Per-turn (reset together)
 	turnOutput: AssistantMessage | null = null;

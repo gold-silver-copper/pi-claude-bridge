@@ -784,6 +784,7 @@ export const __test = {
 	extractUserPromptBlocks,
 	consumeQuery,
 	finalizeCurrentStream,
+	watchStreamAbort,
 	resultErrorText,
 	deliverToolResults,
 	drainForAbort,
@@ -1087,12 +1088,37 @@ function ensureTurnStarted(c: QueryContext): void {
 	}
 }
 
+/** Report the current turn as a user abort. Claude Code words an interrupted query as an
+ *  error ("This operation was aborted"); pi must see stopReason "aborted" to treat it as
+ *  the user stopping the run rather than a provider failure. */
+function markAborted(c: QueryContext): void {
+	if (!c.turnOutput) return;
+	c.turnOutput.stopReason = "aborted";
+	c.turnOutput.errorMessage = "Operation aborted";
+}
+
+/** Tie one pi call's abort signal to the query it streams from. The query was started by
+ *  an earlier call, whose signal may belong to a different pi run; without this an Esc
+ *  during a later turn would neither stop Claude Code nor be reported as an abort. */
+function watchStreamAbort(c: QueryContext, signal: AbortSignal | undefined): void {
+	if (!signal) return;
+	const onAbort = () => {
+		c.abortRequested = true;
+		c.requestAbort?.();
+	};
+	if (signal.aborted) onAbort();
+	else signal.addEventListener("abort", onAbort, { once: true });
+}
+
 function finalizeCurrentStream(c: QueryContext, stopReason?: string): void {
 	if (!c.currentPiStream || !c.turnOutput) return;
 	debug(`provider: finalizeCurrentStream called, stopReason=${stopReason}, turnOutput=${JSON.stringify({stopReason: c.turnOutput!.stopReason, error: c.turnOutput!.errorMessage})}`);
 	if (!c.turnStarted) ensureTurnStarted(c);
 	const stream = c.currentPiStream;
-	if (c.turnOutput.stopReason === "error") {
+	if (c.turnOutput.stopReason === "error" && c.abortRequested) markAborted(c);
+	if (c.turnOutput.stopReason === "aborted") {
+		stream!.push({ type: "error", reason: "aborted", error: c.turnOutput });
+	} else if (c.turnOutput.stopReason === "error") {
 		stream!.push({ type: "error", reason: "error", error: c.turnOutput });
 	} else {
 		const reason = stopReason === "length" ? "length" : "stop";
@@ -1327,6 +1353,8 @@ async function consumeQuery(
 				if (queryCtx.turnOutput) {
 					queryCtx.turnOutput.stopReason = "error";
 					queryCtx.turnOutput.errorMessage = resultError;
+					// An interrupted query ends with an error result of its own.
+					if (wasAborted() || queryCtx.abortRequested) markAborted(queryCtx);
 				}
 			}
 		}
@@ -1550,6 +1578,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	if (resultCtx) {
 		claimCurrentPiStream(stream, "tool-result", resultCtx);
 		resultCtx.resetTurnState(model);
+		watchStreamAbort(resultCtx, options?.signal);
 		// User messages (steer/followUp) pi injected into context during the
 		// active query: a steer sent while a tool was executing, drained by pi at
 		// the turn boundary and appended alongside the tool result.
@@ -1746,10 +1775,13 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		try { sdkQuery.close(); } catch {}
 	};
 	const onAbort = () => {
+		if (wasAborted) return;
 		wasAborted = true;
+		abortCtx.abortRequested = true;
 		drainForAbort(abortCtx, promptStream);
 		requestAbort();
 	};
+	queryCtx.requestAbort = onAbort;
 	if (options?.signal) {
 		if (options.signal.aborted) onAbort();
 		else options.signal.addEventListener("abort", onAbort, { once: true });
@@ -1761,7 +1793,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			debug(`provider: consumeQuery completed, stopReason=${queryCtx.turnOutput?.stopReason}, error=${queryCtx.turnOutput?.errorMessage}, aborted=${wasAborted}`);
 
 			// --- Abort detection in normal completion path ---
-			if (wasAborted || options?.signal?.aborted) {
+			if (wasAborted || options?.signal?.aborted || queryCtx.abortRequested) {
 				if (sharedSession) sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
 				debug(`provider: abort detected, marked sharedSession needsRebuild + forceRotate`);
 				if (queryCtx.turnOutput) {
@@ -1798,17 +1830,19 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		})
 		.catch((error) => {
 			debug(`provider: query error, model=${cliModel}, aborted=${Boolean(options?.signal?.aborted)}, error=`, error);
-			if ((wasAborted || options?.signal?.aborted) && sharedSession) {
+			const aborted = wasAborted || Boolean(options?.signal?.aborted) || queryCtx.abortRequested;
+			if (aborted && sharedSession) {
 				sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
 			} else {
 				sharedSession = null;
 			}
 			promptStream.fail(error instanceof Error ? error : new Error(String(error)));
 			if (queryCtx.turnOutput) {
-				queryCtx.turnOutput.stopReason = options?.signal?.aborted ? "aborted" : "error";
+				queryCtx.turnOutput.stopReason = aborted ? "aborted" : "error";
 				// The SDK drops its copy of the result text if any message follows the error
 				// result, so prefer the cause consumeQuery recorded off the result itself.
 				queryCtx.turnOutput.errorMessage ??= error instanceof Error ? error.message : String(error);
+				if (aborted) markAborted(queryCtx);
 			}
 			if (!isReentrant && queryCtx.activeQuery === sdkQuery) {
 				queryCtx.releasePendingToolCalls("Query ended");
